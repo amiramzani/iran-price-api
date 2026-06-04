@@ -1,49 +1,47 @@
 name: Update Prices
-
+ 
 on:
   schedule:
-    - cron: '*/10 * * * *'   # هر ۱۰ دقیقه
-  workflow_dispatch:           # اجرای دستی هم ممکن باشه
-
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+ 
 jobs:
   fetch:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
+ 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Fetch prices from TGJU
+ 
+      - name: Fetch & parse prices
         run: |
-          curl -s \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-            -H "Referer: https://www.tgju.org/" \
-            -H "Accept: application/json" \
-            "https://call.tgju.org/ajax.json" \
-            -o raw.json
-
           python3 - << 'PYEOF'
-          import json, math, os
+          import json, os, urllib.request, urllib.error
           from datetime import datetime
-
-          with open("raw.json") as f:
-              raw = json.load(f)
-
-          current = raw.get("current", {})
-
-          def p(val):
-              if not val:
-                  return 0
-              try:
-                  return float(str(val).replace(",", ""))
-              except:
-                  return 0
-
-          def toman(x):
-              return round(x / 10)
-
+ 
+          SOURCES = [
+              {
+                  "url": "https://call.tgju.org/ajax.json",
+                  "headers": {
+                      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                      "Accept": "application/json, text/javascript, */*; q=0.01",
+                      "Accept-Language": "fa-IR,fa;q=0.9,en-US;q=0.8",
+                      "Referer": "https://www.tgju.org/",
+                      "Origin": "https://www.tgju.org",
+                      "X-Requested-With": "XMLHttpRequest",
+                  }
+              },
+              {
+                  "url": "https://call2.tgju.org/ajax.json",
+                  "headers": {
+                      "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+                      "Referer": "https://www.tgju.org/",
+                  }
+              },
+          ]
+ 
           MAP = {
               "USD":     ("price_dollar_rl", True),
               "EUR":     ("price_euro",      True),
@@ -58,37 +56,49 @@ jobs:
               "QUARTER": ("rob",             False),
               "GRAM":    ("seke_gerami",     False),
           }
-
+ 
+          def pn(val):
+              try: return float(str(val).replace(",", ""))
+              except: return 0
+ 
+          def fetch_source(src):
+              req = urllib.request.Request(src["url"], headers=src["headers"])
+              with urllib.request.urlopen(req, timeout=15) as r:
+                  return json.loads(r.read().decode("utf-8"))
+ 
+          raw = None
+          for src in SOURCES:
+              try:
+                  raw = fetch_source(src)
+                  print(f"✅ fetched from {src['url']}")
+                  break
+              except Exception as e:
+                  print(f"❌ {src['url']}: {e}")
+ 
+          if not raw:
+              raise Exception("All sources failed")
+ 
+          current = raw.get("current", {})
           out = {}
           for sym, (key, is_currency) in MAP.items():
               row = current.get(key, {})
-              price  = p(row.get("p",  0))
-              change = p(row.get("d",  0))
-              pct    = p(row.get("dp", 0))
+              price  = pn(row.get("p",  0))
+              change = pn(row.get("d",  0))
+              pct    = pn(row.get("dp", 0))
               if is_currency:
-                  price  = toman(price)
-                  change = toman(change)
+                  price  = round(price  / 10)
+                  change = round(change / 10)
               if price > 0:
-                  out[sym] = {
-                      "price":  price,
-                      "change": change,
-                      "pct":    round(pct, 2),
-                      "ts":     datetime.utcnow().isoformat() + "Z"
-                  }
-
-          result = {
-              "ok":      len(out) >= 5,
-              "updated": datetime.utcnow().isoformat() + "Z",
-              "data":    out
-          }
-
+                  out[sym] = {"price": price, "change": change, "pct": round(pct, 2),
+                              "ts": datetime.utcnow().isoformat() + "Z"}
+ 
+          result = {"ok": len(out) >= 5, "updated": datetime.utcnow().isoformat() + "Z", "data": out}
           os.makedirs("data", exist_ok=True)
           with open("data/prices.json", "w") as f:
               json.dump(result, f, ensure_ascii=False, indent=2)
-
-          print(f"✅ {len(out)} symbols written")
+          print(f"✅ {len(out)} symbols written → ok={result['ok']}")
           PYEOF
-
+ 
       - name: Commit & push
         run: |
           git config user.name  "github-actions[bot]"
